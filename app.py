@@ -197,6 +197,65 @@ def add_to_watchlist():
     return jsonify({"symbol": symbol, "email": email, "latest_price": price})
 
 
+@app.route("/watchlist/<symbol>", methods=["DELETE"])
+def delete_from_watchlist(symbol):
+    """
+    Delete a stock symbol from the current user's watchlist.
+    """
+    ensure_watchlist_table()
+    symbol = symbol.strip().upper()
+    email = _current_user_email()
+
+    lakebase.run_write(
+        f"DELETE FROM {WATCHLIST_TABLE_NAME} WHERE symbol = %s AND email = %s",
+        (symbol, email),
+    )
+
+    return jsonify({"symbol": symbol, "deleted": True})
+
+
+@app.route("/watchlist/<symbol>/refresh", methods=["POST"])
+def refresh_stock(symbol):
+    """
+    Refresh the latest price for a stock symbol already in the watchlist.
+    Fetches fresh data from the Massive API and updates the watchlist.
+    """
+    ensure_watchlist_table()
+    symbol = symbol.strip().upper()
+    email = _current_user_email()
+
+    # Verify the symbol exists in the user's watchlist
+    rows = lakebase.run_query(
+        f"SELECT symbol FROM {WATCHLIST_TABLE_NAME} WHERE symbol = %s AND email = %s",
+        (symbol, email),
+    )
+    if not rows:
+        return jsonify({"error": f"Symbol {symbol} not found in your watchlist"}), 404
+
+    # Fetch latest price from Massive API
+    client = MassiveClient()
+    try:
+        data = client.get_latest_price(symbol)
+    except requests.HTTPError:
+        return jsonify({"error": f"Failed to fetch data for {symbol}"}), 400
+
+    price = _extract_latest_price(data)
+    if price is None:
+        return jsonify({"error": f"No price data available for {symbol}"}), 400
+
+    # Update the watchlist with the new price
+    lakebase.run_write(
+        f"""
+        UPDATE {WATCHLIST_TABLE_NAME}
+        SET latest_price = %s, updated_at = now()
+        WHERE symbol = %s AND email = %s
+        """,
+        (price, symbol, email),
+    )
+
+    return jsonify({"symbol": symbol, "latest_price": price, "refreshed": True})
+
+
 def _extract_latest_price(data: dict) -> float | None:
     """Pull the trade price out of the Massive 'previous close' response shape.
 
